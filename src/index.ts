@@ -73,7 +73,8 @@ interface WatchlistEntry {
 	name: string
 	type: "YouTube" | "Website"
 	link: string
-	daysToScan: number
+	startDate: string
+	endDate: string
 }
 
 interface GeminiAnalysis {
@@ -193,12 +194,12 @@ Urgency "Cao" nếu ảnh hưởng trực tiếp thị phần, đối đầu s�
 	}
 }
 
-/** Lấy danh sách video mới đăng của kênh YouTube theo số ngày (mặc định thay cho 48h) */
+/** Lấy danh sách video mới đăng của kênh YouTube theo khoảng thời gian */
 async function fetchRecentYouTubeVideos(
 	channelLink: string,
-	daysToScan: number,
+	startDate: string,
+	endDate: string,
 ): Promise<Array<{ videoId: string; title: string; description: string; publishedAt: string }>> {
-	const sinceX = new Date(Date.now() - daysToScan * 24 * 60 * 60 * 1000).toISOString()
 	const channelIdMatch = channelLink.match(/channel\/(UC[\w-]+)/)
 	const channelId = channelIdMatch?.[1] ?? null
 
@@ -229,11 +230,14 @@ async function fetchRecentYouTubeVideos(
 					}
 				}>
 			}
-			const sinceDate = new Date(sinceX)
+			const startD = new Date(startDate)
+			const endD = new Date(endDate)
 			return (plData.items ?? [])
 				.filter((item) => {
 					const pub = item.snippet?.publishedAt
-					return pub && new Date(pub) >= sinceDate && item.snippet?.resourceId?.videoId
+					if (!pub || !item.snippet?.resourceId?.videoId) return false
+					const d = new Date(pub)
+					return d >= startD && d <= endD
 				})
 				.map((item) => ({
 					videoId: item.snippet!.resourceId!.videoId!,
@@ -247,7 +251,7 @@ async function fetchRecentYouTubeVideos(
 	// Fallback: search API
 	await youtubePacer.wait()
 	const searchRes = await fetch(
-		`https://www.googleapis.com/youtube/v3/search?part=snippet&type=video${channelId ? `&channelId=${channelId}` : ""}&publishedAfter=${sinceX}&maxResults=20&order=date&key=${YOUTUBE_API_KEY}`,
+		`https://www.googleapis.com/youtube/v3/search?part=snippet&type=video${channelId ? `&channelId=${channelId}` : ""}&publishedAfter=${startDate}&publishedBefore=${endDate}&maxResults=20&order=date&key=${YOUTUBE_API_KEY}`,
 		{ signal: AbortSignal.timeout(10000) },
 	)
 	const searchData = (await searchRes.json()) as {
@@ -293,7 +297,7 @@ async function scanYouTubeChannel(entry: WatchlistEntry): Promise<ProcessedItem[
 	let videos: Array<{ videoId: string; title: string; description: string; publishedAt: string }> = []
 
 	try {
-		videos = await fetchRecentYouTubeVideos(entry.link, entry.daysToScan)
+		videos = await fetchRecentYouTubeVideos(entry.link, entry.startDate, entry.endDate)
 	} catch (err) {
 		console.error(`Lỗi lấy video YouTube [${entry.name}]:`, err)
 		return items
@@ -364,7 +368,8 @@ async function scanWebsite(
 
 async function searchThirdPartyMentions(
 	subjectName: string,
-	daysToScan: number,
+	startDate: string,
+	endDate: string,
 ): Promise<Array<{ url: string; title: string; snippet: string }>> {
 	await mentionsPacer.wait()
 	try {
@@ -376,7 +381,7 @@ async function searchThirdPartyMentions(
 				body: JSON.stringify({
 					contents: [{
 						parts: [{
-							text: `Tìm các bài báo, bài blog, bài review đăng trong ${daysToScan} ngày qua nhắc đến "${subjectName}" liên quan đến sản phẩm, giá cả, tính năng mới, hoặc tin tức kinh doanh. Liệt kê ngắn gọn từng bài tìm được.`,
+							text: `Tìm các bài báo, bài blog, bài review đăng từ ngày ${startDate.split('T')[0]} đến ngày ${endDate.split('T')[0]} nhắc đến "${subjectName}" liên quan đến sản phẩm, giá cả, tính năng mới, hoặc tin tức kinh doanh. Liệt kê ngắn gọn từng bài tìm được.`,
 						}],
 					}],
 					tools: [{ google_search: {} }],
@@ -418,8 +423,8 @@ async function searchThirdPartyMentions(
 	}
 }
 
-async function scanThirdPartyMentions(subjectName: string, daysToScan: number): Promise<ProcessedItem[]> {
-	const mentions = await searchThirdPartyMentions(subjectName, daysToScan)
+async function scanThirdPartyMentions(subjectName: string, startDate: string, endDate: string): Promise<ProcessedItem[]> {
+	const mentions = await searchThirdPartyMentions(subjectName, startDate, endDate)
 	const items: ProcessedItem[] = []
 
 	for (const mention of mentions.slice(0, 5)) {
@@ -481,7 +486,7 @@ worker.sync("competitorScan", {
 										rich_text?: Array<{ plain_text?: string }>
 										select?: { name?: string }
 										url?: string
-										number?: number
+										date?: { start?: string }
 									}
 								>
 							}
@@ -493,7 +498,8 @@ worker.sync("competitorScan", {
 								? "YouTube"
 								: "Website") as "YouTube" | "Website",
 							link: props["Link"]?.url ?? "",
-							daysToScan: props["Số ngày quét"]?.number ?? 7,
+							startDate: props["Từ ngày"]?.date?.start ?? new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+							endDate: props["Đến ngày"]?.date?.start ?? new Date().toISOString(),
 						}
 					})
 					.filter((e) => e.link !== "")
@@ -531,9 +537,12 @@ worker.sync("competitorScan", {
 		// 4. Tìm kiếm mentions qua bên thứ 3 bằng Gemini Grounding (dupe filtering)
 		const uniqueSubjects = [...new Set(watchlistEntries.map((e) => e.name))]
 		for (const subjectName of uniqueSubjects) {
-			const maxDays = Math.max(...watchlistEntries.filter((e) => e.name === subjectName).map((e) => e.daysToScan), 7)
+			const relatedEntries = watchlistEntries.filter((e) => e.name === subjectName)
+			// Lấy startDate xa nhất và endDate gần nhất
+			const minStartDate = relatedEntries.reduce((min, e) => e.startDate < min ? e.startDate : min, relatedEntries[0].startDate)
+			const maxEndDate = relatedEntries.reduce((max, e) => e.endDate > max ? e.endDate : max, relatedEntries[0].endDate)
 			try {
-				const items = await scanThirdPartyMentions(subjectName, maxDays)
+				const items = await scanThirdPartyMentions(subjectName, minStartDate, maxEndDate)
 				allItems.push(...items)
 			} catch (err) {
 				console.error(`Lỗi scan mentions [${subjectName}]:`, err)
@@ -586,7 +595,8 @@ worker.tool("scanChannelNow", {
 			name: subjectName,
 			type: isYouTube ? "YouTube" : "Website",
 			link: url,
-			daysToScan: 7, // Default for Tool is 7 days since it doesn't take daysToScan as input
+			startDate: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), // Default 7 days
+			endDate: new Date().toISOString(),
 		}
 
 		let items: ProcessedItem[]
