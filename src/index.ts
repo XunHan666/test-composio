@@ -18,22 +18,7 @@ const COMPOSIO_API_KEY = process.env.COMPOSIO_API_KEY ?? ""
 // DATABASES
 // ─────────────────────────────────────────────
 
-/** Database 1: Danh sách theo dõi (người dùng tự nhập, không cần sync) */
-const watchlist = worker.database("watchlist", {
-	type: "managed",
-	initialTitle: "Danh sách theo dõi",
-	primaryKeyProperty: "ID",
-	schema: {
-		properties: {
-			"Tên kênh/Website": Schema.title(),
-			"ID": Schema.richText(),
-			"Loại": Schema.select([{ name: "YouTube" }, { name: "Website" }]),
-			"Link": Schema.url(),
-			"Ghi chú": Schema.richText(),
-			"Đang theo dõi": Schema.checkbox(),
-		},
-	},
-})
+
 
 /** Database 2: Nhật ký sự kiện đối thủ — bảng kết quả chính */
 const competitorLog = worker.database("competitorLog", {
@@ -70,26 +55,7 @@ const competitorLog = worker.database("competitorLog", {
 	},
 })
 
-/** Database 3: Yêu cầu báo cáo */
-const reportRequests = worker.database("reportRequests", {
-	type: "managed",
-	initialTitle: "Yêu cầu báo cáo",
-	primaryKeyProperty: "Request ID",
-	schema: {
-		properties: {
-			"Tên yêu cầu": Schema.title(),
-			"Request ID": Schema.richText(),
-			"Từ ngày": Schema.date(),
-			"Đến ngày": Schema.date(),
-			"Trạng thái": Schema.select([
-				{ name: "Mới yêu cầu" },
-				{ name: "Đang xử lý" },
-				{ name: "Xong" },
-			]),
-			"Link báo cáo": Schema.url(),
-		},
-	},
-})
+
 
 // ─────────────────────────────────────────────
 // PACERS
@@ -809,6 +775,4 @@ ${tableRows || "_(Không có dữ liệu trong khoảng này)_"}
 	},
 })
 
-// Tham chiếu tránh TypeScript "unused variable" warning
-void watchlist
-void reportRequests
+
