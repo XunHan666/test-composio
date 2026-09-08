@@ -48,6 +48,14 @@ const competitorLog = worker.database("competitorLog", {
 				{ name: "Không" },
 				{ name: "Chỉ title-description" },
 			]),
+			"Sản phẩm bị đe dọa": Schema.select([
+				{ name: "Cyabra", color: "blue" },
+				{ name: "Similarweb", color: "orange" },
+				{ name: "Omdia", color: "purple" },
+				{ name: "Vicarius (vRx)", color: "red" },
+				{ name: "Dịch vụ Local", color: "green" },
+			]),
+			"Mảng giải pháp": Schema.select([]),
 			"Tác động dự kiến": Schema.richText(),
 			"Bằng chứng & Link": Schema.url(),
 			"Ngày phát hiện": Schema.date(),
@@ -84,6 +92,8 @@ interface GeminiAnalysis {
 	urgency: "Cao" | "Theo dõi thêm"
 	impact: string
 	evidence: string
+	threatenedProduct: string
+	solutionArea: string
 }
 
 /** Intermediate type — all scalar values, used for both sync and tool */
@@ -95,6 +105,8 @@ interface ProcessedItem {
 	classification: string
 	urgency: "Cao" | "Theo dõi thêm"
 	impact: string
+	threatenedProduct: string
+	solutionArea: string
 	transcriptSource: "Có" | "Không" | "Chỉ title-description"
 	link: string
 	publishedAt: string
@@ -146,12 +158,24 @@ async function analyzeWithGemini(
 Tiêu đề: ${title}
 ${contentSection}
 
+Dựa vào danh sách Mapping sau đây để xác định "threatenedProduct" và "solutionArea":
+- Cyabra: Blackbird.AI, Alethea (Artemis), Graphika, ZeroFox, ActiveFence
+- Similarweb: SEMrush, Ahrefs, Sensor Tower (Data.ai), Comscore
+- Omdia: Gartner, IDC, Forrester
+- Vicarius (vRx): Qualys (VMDR), Tenable (Nessus), NinjaOne, ManageEngine
+- Dịch vụ Local: YouNet Media, Buzzmetrics, Kompa Group, Viettel Cyber Security, VNPT Cyber Immunity
+
+Nếu đối thủ không có trong danh sách trên, hãy tự đoán Threatened Product phù hợp nhất trong 5 lựa chọn trên. 
+solutionArea là tên mảng giải pháp bằng tiếng Việt (ví dụ: Lắng nghe mạng xã hội, Tối ưu tìm kiếm, Quản lý lỗ hổng bảo mật...).
+
 Trả về JSON:
 {
   "classification": "Sponsored Video" | "Review" | "New Feature" | "Pricing Change",
   "urgency": "Cao" | "Theo dõi thêm",
   "impact": "Nhận định tác động 1-2 câu tiếng Việt",
-  "evidence": "Trích dẫn bằng chứng cụ thể từ nội dung"
+  "evidence": "Trích dẫn bằng chứng cụ thể từ nội dung",
+  "threatenedProduct": "Tên sản phẩm bị đe dọa (Cyabra, Similarweb, Omdia, Vicarius (vRx) hoặc Dịch vụ Local)",
+  "solutionArea": "Tên mảng giải pháp bằng tiếng Việt"
 }
 
 Urgency "Cao" nếu ảnh hưởng trực tiếp thị phần, đối đầu sản phẩm, thay đổi giá.`
@@ -184,6 +208,8 @@ Urgency "Cao" nếu ảnh hưởng trực tiếp thị phần, đối đầu s�
 			urgency: parsed.urgency === "Cao" ? "Cao" : "Theo dõi thêm",
 			impact: parsed.impact ?? "",
 			evidence: parsed.evidence ?? title,
+			threatenedProduct: parsed.threatenedProduct ?? "Unknown",
+			solutionArea: parsed.solutionArea ?? "Unknown",
 		}
 	} catch (err) {
 		console.error("Gemini error:", err)
@@ -192,6 +218,8 @@ Urgency "Cao" nếu ảnh hưởng trực tiếp thị phần, đối đầu s�
 			urgency: "Theo dõi thêm",
 			impact: "Không thể phân tích tự động.",
 			evidence: title,
+			threatenedProduct: "Unknown",
+			solutionArea: "Unknown",
 		}
 	}
 }
@@ -318,6 +346,8 @@ async function scanYouTubeChannel(entry: WatchlistEntry): Promise<ProcessedItem[
 			classification: analysis.classification,
 			urgency: analysis.urgency,
 			impact: analysis.impact,
+			threatenedProduct: analysis.threatenedProduct,
+			solutionArea: analysis.solutionArea,
 			transcriptSource: transcript ? "Có" : "Chỉ title-description",
 			link: `https://www.youtube.com/watch?v=${video.videoId}`,
 			publishedAt: video.publishedAt,
@@ -359,6 +389,8 @@ async function scanWebsite(
 				classification: analysis.classification,
 				urgency: analysis.urgency,
 				impact: analysis.impact,
+				threatenedProduct: analysis.threatenedProduct,
+				solutionArea: analysis.solutionArea,
 				transcriptSource: "Không",
 				link: entry.link,
 				publishedAt: now,
@@ -440,6 +472,8 @@ async function scanThirdPartyMentions(subjectName: string, startDate: string, en
 			classification: analysis.classification,
 			urgency: analysis.urgency,
 			impact: analysis.impact,
+			threatenedProduct: analysis.threatenedProduct,
+			solutionArea: analysis.solutionArea,
 			transcriptSource: "Không",
 			link: mention.url,
 			publishedAt: new Date().toISOString(),
@@ -585,6 +619,8 @@ worker.sync("competitorScan", {
 					"Nền tảng": Builder.select(item.platform),
 					"Phân loại": Builder.select(item.classification),
 					"Mức độ khẩn cấp": Builder.select(item.urgency),
+					"Sản phẩm bị đe dọa": Builder.select(item.threatenedProduct),
+					"Mảng giải pháp": Builder.select(item.solutionArea),
 					"Trạng thái xử lý": Builder.select("Mới"),
 					"Nguồn transcript": Builder.select(item.transcriptSource),
 					"Tác động dự kiến": Builder.richText(item.impact.slice(0, 2000)),
@@ -659,6 +695,8 @@ worker.tool("scanChannelNow", {
 						"Nền tảng": { select: { name: item.platform } },
 						"Phân loại": { select: { name: item.classification } },
 						"Mức độ khẩn cấp": { select: { name: item.urgency } },
+						"Sản phẩm bị đe dọa": { select: { name: item.threatenedProduct } },
+						"Mảng giải pháp": { select: { name: item.solutionArea } },
 						"Trạng thái xử lý": { select: { name: "Mới" } },
 						"Nguồn transcript": { select: { name: item.transcriptSource } },
 						"Tác động dự kiến": { rich_text: [{ text: { content: item.impact.slice(0, 2000) } }] },
