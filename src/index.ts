@@ -30,7 +30,7 @@ const competitorLog = worker.database("competitorLog", {
 			"Tiêu đề": Schema.title(),
 			"Event ID": Schema.richText(),
 			"Chủ thể": Schema.select([]),
-			"Nền tảng": Schema.select([{ name: "YouTube" }, { name: "Website" }]),
+			"Nền tảng": Schema.select([{ name: "YouTube" }, { name: "Website" }, { name: "Bên thứ 3" }]),
 			"Phân loại": Schema.select([
 				{ name: "Sponsored Video" },
 				{ name: "Review" },
@@ -62,6 +62,7 @@ const competitorLog = worker.database("competitorLog", {
 // ─────────────────────────────────────────────
 const youtubePacer = worker.pacer("youtube", { allowedRequests: 5, intervalMs: 1000 })
 const geminiPacer = worker.pacer("gemini", { allowedRequests: 5, intervalMs: 1000 })
+const mentionsPacer = worker.pacer("mentions", { allowedRequests: 2, intervalMs: 2000 })
 
 // ─────────────────────────────────────────────
 // INTERNAL TYPES
@@ -72,6 +73,7 @@ interface WatchlistEntry {
 	name: string
 	type: "YouTube" | "Website"
 	link: string
+	daysToScan: number
 }
 
 interface GeminiAnalysis {
@@ -86,7 +88,7 @@ interface ProcessedItem {
 	eventId: string
 	shortTitle: string
 	subjectName: string
-	platform: "YouTube" | "Website"
+	platform: "YouTube" | "Website" | "Bên thứ 3"
 	classification: string
 	urgency: "Cao" | "Theo dõi thêm"
 	impact: string
@@ -191,11 +193,12 @@ Urgency "Cao" nếu ảnh hưởng trực tiếp thị phần, đối đầu s�
 	}
 }
 
-/** Lấy danh sách video mới đăng (48h) của kênh YouTube */
+/** Lấy danh sách video mới đăng của kênh YouTube theo số ngày (mặc định thay cho 48h) */
 async function fetchRecentYouTubeVideos(
 	channelLink: string,
+	daysToScan: number,
 ): Promise<Array<{ videoId: string; title: string; description: string; publishedAt: string }>> {
-	const since48h = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString()
+	const sinceX = new Date(Date.now() - daysToScan * 24 * 60 * 60 * 1000).toISOString()
 	const channelIdMatch = channelLink.match(/channel\/(UC[\w-]+)/)
 	const channelId = channelIdMatch?.[1] ?? null
 
@@ -226,7 +229,7 @@ async function fetchRecentYouTubeVideos(
 					}
 				}>
 			}
-			const sinceDate = new Date(since48h)
+			const sinceDate = new Date(sinceX)
 			return (plData.items ?? [])
 				.filter((item) => {
 					const pub = item.snippet?.publishedAt
@@ -244,7 +247,7 @@ async function fetchRecentYouTubeVideos(
 	// Fallback: search API
 	await youtubePacer.wait()
 	const searchRes = await fetch(
-		`https://www.googleapis.com/youtube/v3/search?part=snippet&type=video${channelId ? `&channelId=${channelId}` : ""}&publishedAfter=${since48h}&maxResults=10&order=date&key=${YOUTUBE_API_KEY}`,
+		`https://www.googleapis.com/youtube/v3/search?part=snippet&type=video${channelId ? `&channelId=${channelId}` : ""}&publishedAfter=${sinceX}&maxResults=20&order=date&key=${YOUTUBE_API_KEY}`,
 		{ signal: AbortSignal.timeout(10000) },
 	)
 	const searchData = (await searchRes.json()) as {
@@ -287,11 +290,10 @@ async function fetchWebsiteContent(url: string): Promise<string> {
 /** Quét 1 kênh YouTube, trả về ProcessedItems */
 async function scanYouTubeChannel(entry: WatchlistEntry): Promise<ProcessedItem[]> {
 	const items: ProcessedItem[] = []
-	let videos: Array<{ videoId: string; title: string; description: string; publishedAt: string }> =
-		[]
+	let videos: Array<{ videoId: string; title: string; description: string; publishedAt: string }> = []
 
 	try {
-		videos = await fetchRecentYouTubeVideos(entry.link)
+		videos = await fetchRecentYouTubeVideos(entry.link, entry.daysToScan)
 	} catch (err) {
 		console.error(`Lỗi lấy video YouTube [${entry.name}]:`, err)
 		return items
@@ -360,6 +362,85 @@ async function scanWebsite(
 	}
 }
 
+async function searchThirdPartyMentions(
+	subjectName: string,
+	daysToScan: number,
+): Promise<Array<{ url: string; title: string; snippet: string }>> {
+	await mentionsPacer.wait()
+	try {
+		const res = await fetch(
+			`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					contents: [{
+						parts: [{
+							text: `Tìm các bài báo, bài blog, bài review đăng trong ${daysToScan} ngày qua nhắc đến "${subjectName}" liên quan đến sản phẩm, giá cả, tính năng mới, hoặc tin tức kinh doanh. Liệt kê ngắn gọn từng bài tìm được.`,
+						}],
+					}],
+					tools: [{ google_search: {} }],
+					generationConfig: { temperature: 0.2 },
+				}),
+				signal: AbortSignal.timeout(30000),
+			},
+		)
+		if (!res.ok) throw new Error(`Gemini grounding HTTP ${res.status}`)
+
+		const data = (await res.json()) as {
+			candidates?: Array<{
+				groundingMetadata?: {
+					groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>
+				}
+			}>
+		}
+
+		// QUAN TRỌNG: chỉ lấy link thật từ groundingChunks (do Google Search trả về),
+		// KHÔNG lấy link tự do Gemini viết trong phần text — tránh bịa URL.
+		const chunks = data.candidates?.[0]?.groundingMetadata?.groundingChunks ?? []
+		const seen = new Set<string>()
+		const results: Array<{ url: string; title: string; snippet: string }> = []
+
+		for (const chunk of chunks) {
+			const uri = chunk.web?.uri
+			if (!uri || seen.has(uri)) continue
+			seen.add(uri)
+			results.push({
+				url: uri,
+				title: chunk.web?.title ?? uri,
+				snippet: chunk.web?.title ?? "",
+			})
+		}
+		return results
+	} catch (err) {
+		console.error(`Lỗi tìm mentions cho ${subjectName}:`, err)
+		return []
+	}
+}
+
+async function scanThirdPartyMentions(subjectName: string, daysToScan: number): Promise<ProcessedItem[]> {
+	const mentions = await searchThirdPartyMentions(subjectName, daysToScan)
+	const items: ProcessedItem[] = []
+
+	for (const mention of mentions.slice(0, 5)) {
+		await geminiPacer.wait()
+		const analysis = await analyzeWithGemini(mention.title, mention.snippet, null, subjectName)
+		items.push({
+			eventId: hashString(`mention-${mention.url}`),
+			shortTitle: mention.title.split(/\s+/).slice(0, 14).join(" "),
+			subjectName,
+			platform: "Bên thứ 3",
+			classification: analysis.classification,
+			urgency: analysis.urgency,
+			impact: analysis.impact,
+			transcriptSource: "Không",
+			link: mention.url,
+			publishedAt: new Date().toISOString(),
+		})
+	}
+	return items
+}
+
 // ─────────────────────────────────────────────
 // SYNC: competitorScan
 // ─────────────────────────────────────────────
@@ -367,7 +448,7 @@ async function scanWebsite(
 worker.sync("competitorScan", {
 	database: competitorLog,
 	mode: "incremental",
-	schedule: "12h",
+	schedule: "manual",
 	execute: async (state: SyncState | undefined, { notion }) => {
 		const snapshots: Record<string, string> = state?.websiteSnapshots ?? {}
 		const allItems: ProcessedItem[] = []
@@ -400,6 +481,7 @@ worker.sync("competitorScan", {
 										rich_text?: Array<{ plain_text?: string }>
 										select?: { name?: string }
 										url?: string
+										number?: number
 									}
 								>
 							}
@@ -411,6 +493,7 @@ worker.sync("competitorScan", {
 								? "YouTube"
 								: "Website") as "YouTube" | "Website",
 							link: props["Link"]?.url ?? "",
+							daysToScan: props["Số ngày quét"]?.number ?? 7,
 						}
 					})
 					.filter((e) => e.link !== "")
@@ -445,7 +528,19 @@ worker.sync("competitorScan", {
 			}
 		}
 
-		// 4. Build changes với proper typing inline (TypeScript infers từ database schema)
+		// 4. Tìm kiếm mentions qua bên thứ 3 bằng Gemini Grounding (dupe filtering)
+		const uniqueSubjects = [...new Set(watchlistEntries.map((e) => e.name))]
+		for (const subjectName of uniqueSubjects) {
+			const maxDays = Math.max(...watchlistEntries.filter((e) => e.name === subjectName).map((e) => e.daysToScan), 7)
+			try {
+				const items = await scanThirdPartyMentions(subjectName, maxDays)
+				allItems.push(...items)
+			} catch (err) {
+				console.error(`Lỗi scan mentions [${subjectName}]:`, err)
+			}
+		}
+
+		// 5. Build changes với proper typing inline (TypeScript infers từ database schema)
 		return {
 			changes: allItems.map((item) => ({
 				type: "upsert" as const,
@@ -491,6 +586,7 @@ worker.tool("scanChannelNow", {
 			name: subjectName,
 			type: isYouTube ? "YouTube" : "Website",
 			link: url,
+			daysToScan: 7, // Default for Tool is 7 days since it doesn't take daysToScan as input
 		}
 
 		let items: ProcessedItem[]
