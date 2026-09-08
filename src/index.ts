@@ -69,12 +69,14 @@ const mentionsPacer = worker.pacer("mentions", { allowedRequests: 2, intervalMs:
 // ─────────────────────────────────────────────
 
 interface WatchlistEntry {
+	pageId: string
 	id: string
 	name: string
 	type: "YouTube" | "Website"
 	link: string
 	startDate: string
 	endDate: string
+	requestScan: boolean
 }
 
 interface GeminiAnalysis {
@@ -453,7 +455,7 @@ async function scanThirdPartyMentions(subjectName: string, startDate: string, en
 worker.sync("competitorScan", {
 	database: competitorLog,
 	mode: "incremental",
-	schedule: "manual",
+	schedule: "5m",
 	execute: async (state: SyncState | undefined, { notion }) => {
 		const snapshots: Record<string, string> = state?.websiteSnapshots ?? {}
 		const allItems: ProcessedItem[] = []
@@ -487,11 +489,13 @@ worker.sync("competitorScan", {
 										select?: { name?: string }
 										url?: string
 										date?: { start?: string }
+										checkbox?: boolean
 									}
 								>
 							}
 						).properties
 						return {
+							pageId: p.id,
 							id: props["ID"]?.rich_text?.[0]?.plain_text ?? p.id,
 							name: props["Tên kênh/Website"]?.title?.[0]?.plain_text ?? "Unknown",
 							type: (props["Loại"]?.select?.name === "YouTube"
@@ -500,6 +504,7 @@ worker.sync("competitorScan", {
 							link: props["Link"]?.url ?? "",
 							startDate: props["Từ ngày"]?.date?.start ?? new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
 							endDate: props["Đến ngày"]?.date?.start ?? new Date().toISOString(),
+							requestScan: props["Yêu cầu quét ngay"]?.checkbox ?? false,
 						}
 					})
 					.filter((e) => e.link !== "")
@@ -508,10 +513,15 @@ worker.sync("competitorScan", {
 			console.error("Lỗi đọc watchlist:", err)
 		}
 
-		console.log(`Quét ${watchlistEntries.length} nguồn theo dõi...`)
+		const requestedEntries = watchlistEntries.filter((e) => e.requestScan)
+		if (requestedEntries.length === 0) {
+			return { changes: [], hasMore: false, nextState: { websiteSnapshots: snapshots } satisfies SyncState }
+		}
+
+		console.log(`Quét ${requestedEntries.length} nguồn có yêu cầu...`)
 
 		// 2. Xử lý kênh YouTube
-		for (const entry of watchlistEntries.filter((e) => e.type === "YouTube")) {
+		for (const entry of requestedEntries.filter((e) => e.type === "YouTube")) {
 			try {
 				const items = await scanYouTubeChannel(entry)
 				allItems.push(...items)
@@ -523,7 +533,7 @@ worker.sync("competitorScan", {
 
 		// 3. Xử lý website
 		const newSnapshots: Record<string, string> = { ...snapshots }
-		for (const entry of watchlistEntries.filter((e) => e.type === "Website")) {
+		for (const entry of requestedEntries.filter((e) => e.type === "Website")) {
 			try {
 				const { items, newSnapshot } = await scanWebsite(entry, snapshots)
 				allItems.push(...items)
@@ -535,9 +545,9 @@ worker.sync("competitorScan", {
 		}
 
 		// 4. Tìm kiếm mentions qua bên thứ 3 bằng Gemini Grounding (dupe filtering)
-		const uniqueSubjects = [...new Set(watchlistEntries.map((e) => e.name))]
+		const uniqueSubjects = [...new Set(requestedEntries.map((e) => e.name))]
 		for (const subjectName of uniqueSubjects) {
-			const relatedEntries = watchlistEntries.filter((e) => e.name === subjectName)
+			const relatedEntries = requestedEntries.filter((e) => e.name === subjectName)
 			// Lấy startDate xa nhất và endDate gần nhất
 			const minStartDate = relatedEntries.reduce((min, e) => e.startDate < min ? e.startDate : min, relatedEntries[0].startDate)
 			const maxEndDate = relatedEntries.reduce((max, e) => e.endDate > max ? e.endDate : max, relatedEntries[0].endDate)
@@ -546,6 +556,20 @@ worker.sync("competitorScan", {
 				allItems.push(...items)
 			} catch (err) {
 				console.error(`Lỗi scan mentions [${subjectName}]:`, err)
+			}
+		}
+
+		// Xóa tick "Yêu cầu quét ngay" trên Notion
+		for (const entry of requestedEntries) {
+			try {
+				await notion.pages.update({
+					page_id: entry.pageId,
+					properties: {
+						"Yêu cầu quét ngay": { checkbox: false }
+					}
+				})
+			} catch (e) {
+				console.error("Lỗi xóa tick:", e)
 			}
 		}
 
@@ -591,12 +615,14 @@ worker.tool("scanChannelNow", {
 			url.includes("youtube.com") || url.includes("youtu.be") || url.includes("/@")
 
 		const entry: WatchlistEntry = {
+			pageId: "tool-run",
 			id: hashString(url),
 			name: subjectName,
 			type: isYouTube ? "YouTube" : "Website",
 			link: url,
 			startDate: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), // Default 7 days
 			endDate: new Date().toISOString(),
+			requestScan: true,
 		}
 
 		let items: ProcessedItem[]
