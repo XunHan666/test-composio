@@ -7,6 +7,17 @@ const worker = new Worker()
 export default worker
 
 // ─────────────────────────────────────────────
+// THIẾT KẾ WORKER — 4 câu hỏi cốt lõi (Nguyên tắc 1.1)
+// ─────────────────────────────────────────────
+// Trigger     : Webhook "investigateCompetitors" — nút bấm trên Bảng 3 (Yêu cầu báo cáo)
+//               Tool "scanChannelNow" — gọi qua chat Custom Agent
+// Input       : page_id dòng Yêu cầu (webhook) | url + subjectName + ... (tool)
+// Output      : Dòng sự kiện vào Bảng 2 + Google Doc tóm tắt (webhook) | dòng đơn lẻ (tool)
+// Batch size  : Tối đa 50 nguồn Watchlist × 10 video/kênh; 5 mentions/đối thủ
+// Idempotency : eventId = SHA-256 hash nguồn; kiểm tra Event ID trước khi ghi, retry không tạo dữ liệu trùng
+// Hỏng giữa chừng: Sự kiện đã ghi giữ nguyên; retry sẽ skip qua kiểm tra eventId
+
+// ─────────────────────────────────────────────
 // ENV VARS
 // ─────────────────────────────────────────────
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY ?? ""
@@ -418,9 +429,15 @@ async function writeItemsToNotionDb(
 	items: ProcessedItem[],
 	dbId: string,
 	notion: Client,
+	existingIds: Set<string> = new Set(),
 ): Promise<number> {
 	let created = 0
 	for (const item of items) {
+		// Idempotency: bỏ qua nếu Event ID đã tồn tại (Nguyên tắc 1.2)
+		if (existingIds.has(item.eventId)) {
+			console.log(`Bỏ qua trùng eventId: ${item.eventId}`)
+			continue
+		}
 		try {
 			await notion.pages.create({
 				parent: { database_id: dbId },
@@ -496,6 +513,12 @@ worker.webhook("investigateCompetitors", {
 				continue
 			}
 
+			// Fail fast: validate API key trước khi gọi bất kỳ API tốn quota nào (Nguyên tắc 1.3)
+			if (!GEMINI_API_KEY) {
+				console.error("investigateCompetitors: GEMINI_API_KEY chưa cấu hình — dừng để tránh tốn chi phí")
+				continue
+			}
+
 			// ── Bước 2: Đánh dấu "Đang xử lý" ──────────────────────────────
 			try {
 				await notion.pages.update({
@@ -517,6 +540,7 @@ worker.webhook("investigateCompetitors", {
 				if (wlDs) {
 					const wlPages = await notion.dataSources.query({
 						data_source_id: wlDs.id,
+						page_size: 50, // Giới hạn tối đa — tránh watchlist quá lớn làm treo lượt chạy (Nguyên tắc 2.2)
 					})
 					watchlistEntries = wlPages.results
 						.filter((p) => p.object === "page")
@@ -597,7 +621,7 @@ worker.webhook("investigateCompetitors", {
 				}
 			}
 
-			// ── Bước 7: Ghi vào Bảng 2 ──────────────────────────────────────
+			// ── Bước 7: Ghi vào Bảng 2 (idempotent — skip trùng theo eventId) ──
 			let created = 0
 			try {
 				const logSearch = await notion.search({
@@ -606,7 +630,30 @@ worker.webhook("investigateCompetitors", {
 				})
 				const logDs = logSearch.results.find((r) => r.object === "data_source")
 				if (logDs) {
-					created = await writeItemsToNotionDb(allItems, logDs.id, notion)
+					// Lấy Event ID đã tồn tại trong khoảng ngày để skip trùng (Nguyên tắc 1.2 — Idempotency)
+					const existingIds = new Set<string>()
+					try {
+						const existingRes = await notion.dataSources.query({
+							data_source_id: logDs.id,
+							filter: {
+								and: [
+									{ property: "Ngày phát hiện", date: { on_or_after: fromDate } },
+									{ property: "Ngày phát hiện", date: { on_or_before: toDate } },
+								],
+							},
+							page_size: 100,
+						})
+						for (const p of existingRes.results) {
+							if (p.object !== "page") continue
+							const props = (p as { properties: Record<string, { rich_text?: Array<{ plain_text?: string }> }> }).properties
+							const eid = props["Event ID"]?.rich_text?.[0]?.plain_text
+							if (eid) existingIds.add(eid)
+						}
+						console.log(`Đã có ${existingIds.size} sự kiện trong khoảng ngày — sẽ bỏ qua trùng.`)
+					} catch (err) {
+						console.error("Lỗi kiểm tra trùng Event ID:", err)
+					}
+					created = await writeItemsToNotionDb(allItems, logDs.id, notion, existingIds)
 					console.log(`Ghi ${created}/${allItems.length} sự kiện vào Bảng 2.`)
 				} else {
 					console.error("Không tìm thấy database 'Theo dõi Đối thủ Cạnh tranh'.")
@@ -777,7 +824,25 @@ worker.tool("scanChannelNow", {
 			}
 		}
 
-		const created = await writeItemsToNotionDb(items, ds.id, notion)
+		// Kiểm tra Event ID trùng trong 7 ngày gần nhất (Nguyên tắc 1.2 — Idempotency)
+		const existingIds = new Set<string>()
+		try {
+			const existingRes = await notion.dataSources.query({
+				data_source_id: ds.id,
+				filter: { property: "Ngày phát hiện", date: { on_or_after: startDate } },
+				page_size: 100,
+			})
+			for (const p of existingRes.results) {
+				if (p.object !== "page") continue
+				const props = (p as { properties: Record<string, { rich_text?: Array<{ plain_text?: string }> }> }).properties
+				const eid = props["Event ID"]?.rich_text?.[0]?.plain_text
+				if (eid) existingIds.add(eid)
+			}
+		} catch (err) {
+			console.error("Lỗi kiểm tra trùng:", err)
+		}
+
+		const created = await writeItemsToNotionDb(items, ds.id, notion, existingIds)
 
 		return {
 			summary: `✅ Quét xong ${subjectName} (${entry.type}): ${items.length} sự kiện phát hiện, ghi thành công ${created} vào Notion.`,
