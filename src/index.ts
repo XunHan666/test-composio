@@ -485,6 +485,7 @@ worker.webhook("investigateCompetitors", {
 			let fromDate: string | undefined
 			let toDate: string | undefined
 			let requestName = "Báo cáo"
+			let selectedCompetitorIds: string[] = []
 
 			try {
 				const page = await notion.pages.retrieve({ page_id: pageId })
@@ -496,6 +497,7 @@ worker.webhook("investigateCompetitors", {
 								title?: Array<{ plain_text?: string }>
 								date?: { start?: string }
 								select?: { name?: string }
+								relation?: Array<{ id: string }>
 							}
 						>
 					}
@@ -503,6 +505,7 @@ worker.webhook("investigateCompetitors", {
 				fromDate = props["Từ ngày"]?.date?.start
 				toDate = props["Đến ngày"]?.date?.start
 				requestName = props["Tên yêu cầu"]?.title?.[0]?.plain_text ?? "Báo cáo"
+				selectedCompetitorIds = props["Đối thủ"]?.relation?.map(r => r.id) ?? []
 			} catch (err) {
 				console.error("Lỗi đọc trang yêu cầu:", err)
 				continue
@@ -569,6 +572,11 @@ worker.webhook("investigateCompetitors", {
 							}
 						})
 						.filter((e) => e.youtubeLink !== "" || e.websiteLink !== "")
+					
+					// Lọc lại nếu có chọn đối thủ cụ thể
+					if (selectedCompetitorIds.length > 0) {
+						watchlistEntries = watchlistEntries.filter(e => selectedCompetitorIds.includes(e.pageId))
+					}
 				}
 			} catch (err) {
 				console.error("Lỗi đọc watchlist:", err)
