@@ -63,8 +63,6 @@ const competitorLog = worker.database("competitorLog", {
 	},
 })
 
-
-
 // ─────────────────────────────────────────────
 // PACERS
 // ─────────────────────────────────────────────
@@ -85,6 +83,8 @@ interface WatchlistEntry {
 	startDate: string
 	endDate: string
 	requestScan: boolean
+	threatenedProduct: string
+	solutionArea: string
 }
 
 interface GeminiAnalysis {
@@ -92,8 +92,6 @@ interface GeminiAnalysis {
 	urgency: "Cao" | "Theo dõi thêm"
 	impact: string
 	evidence: string
-	threatenedProduct: string
-	solutionArea: string
 }
 
 /** Intermediate type — all scalar values, used for both sync and tool */
@@ -158,24 +156,12 @@ async function analyzeWithGemini(
 Tiêu đề: ${title}
 ${contentSection}
 
-Dựa vào danh sách Mapping sau đây để xác định "threatenedProduct" và "solutionArea":
-- Cyabra: Blackbird.AI, Alethea (Artemis), Graphika, ZeroFox, ActiveFence
-- Similarweb: SEMrush, Ahrefs, Sensor Tower (Data.ai), Comscore
-- Omdia: Gartner, IDC, Forrester
-- Vicarius (vRx): Qualys (VMDR), Tenable (Nessus), NinjaOne, ManageEngine
-- Dịch vụ Local: YouNet Media, Buzzmetrics, Kompa Group, Viettel Cyber Security, VNPT Cyber Immunity
-
-Nếu đối thủ không có trong danh sách trên, hãy tự đoán Threatened Product phù hợp nhất trong 5 lựa chọn trên. 
-solutionArea là tên mảng giải pháp bằng tiếng Việt (ví dụ: Lắng nghe mạng xã hội, Tối ưu tìm kiếm, Quản lý lỗ hổng bảo mật...).
-
 Trả về JSON:
 {
   "classification": "Sponsored Video" | "Review" | "New Feature" | "Pricing Change",
   "urgency": "Cao" | "Theo dõi thêm",
   "impact": "Nhận định tác động 1-2 câu tiếng Việt",
-  "evidence": "Trích dẫn bằng chứng cụ thể từ nội dung",
-  "threatenedProduct": "Tên sản phẩm bị đe dọa (Cyabra, Similarweb, Omdia, Vicarius (vRx) hoặc Dịch vụ Local)",
-  "solutionArea": "Tên mảng giải pháp bằng tiếng Việt"
+  "evidence": "Trích dẫn bằng chứng cụ thể từ nội dung"
 }
 
 Urgency "Cao" nếu ảnh hưởng trực tiếp thị phần, đối đầu sản phẩm, thay đổi giá.`
@@ -208,8 +194,6 @@ Urgency "Cao" nếu ảnh hưởng trực tiếp thị phần, đối đầu s�
 			urgency: parsed.urgency === "Cao" ? "Cao" : "Theo dõi thêm",
 			impact: parsed.impact ?? "",
 			evidence: parsed.evidence ?? title,
-			threatenedProduct: parsed.threatenedProduct ?? "Unknown",
-			solutionArea: parsed.solutionArea ?? "Unknown",
 		}
 	} catch (err) {
 		console.error("Gemini error:", err)
@@ -218,8 +202,6 @@ Urgency "Cao" nếu ảnh hưởng trực tiếp thị phần, đối đầu s�
 			urgency: "Theo dõi thêm",
 			impact: "Không thể phân tích tự động.",
 			evidence: title,
-			threatenedProduct: "Unknown",
-			solutionArea: "Unknown",
 		}
 	}
 }
@@ -346,8 +328,8 @@ async function scanYouTubeChannel(entry: WatchlistEntry): Promise<ProcessedItem[
 			classification: analysis.classification,
 			urgency: analysis.urgency,
 			impact: analysis.impact,
-			threatenedProduct: analysis.threatenedProduct,
-			solutionArea: analysis.solutionArea,
+			threatenedProduct: entry.threatenedProduct,
+			solutionArea: entry.solutionArea,
 			transcriptSource: transcript ? "Có" : "Chỉ title-description",
 			link: `https://www.youtube.com/watch?v=${video.videoId}`,
 			publishedAt: video.publishedAt,
@@ -389,8 +371,8 @@ async function scanWebsite(
 				classification: analysis.classification,
 				urgency: analysis.urgency,
 				impact: analysis.impact,
-				threatenedProduct: analysis.threatenedProduct,
-				solutionArea: analysis.solutionArea,
+				threatenedProduct: entry.threatenedProduct,
+				solutionArea: entry.solutionArea,
 				transcriptSource: "Không",
 				link: entry.link,
 				publishedAt: now,
@@ -457,7 +439,7 @@ async function searchThirdPartyMentions(
 	}
 }
 
-async function scanThirdPartyMentions(subjectName: string, startDate: string, endDate: string): Promise<ProcessedItem[]> {
+async function scanThirdPartyMentions(subjectName: string, startDate: string, endDate: string, threatenedProduct: string, solutionArea: string): Promise<ProcessedItem[]> {
 	const mentions = await searchThirdPartyMentions(subjectName, startDate, endDate)
 	const items: ProcessedItem[] = []
 
@@ -472,8 +454,8 @@ async function scanThirdPartyMentions(subjectName: string, startDate: string, en
 			classification: analysis.classification,
 			urgency: analysis.urgency,
 			impact: analysis.impact,
-			threatenedProduct: analysis.threatenedProduct,
-			solutionArea: analysis.solutionArea,
+			threatenedProduct,
+			solutionArea,
 			transcriptSource: "Không",
 			link: mention.url,
 			publishedAt: new Date().toISOString(),
@@ -539,6 +521,8 @@ worker.sync("competitorScan", {
 							startDate: props["Từ ngày"]?.date?.start ?? new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
 							endDate: props["Đến ngày"]?.date?.start ?? new Date().toISOString(),
 							requestScan: props["Yêu cầu quét ngay"]?.checkbox ?? false,
+							threatenedProduct: props["Sản phẩm bị đe dọa"]?.select?.name ?? "Unknown",
+							solutionArea: props["Mảng giải pháp"]?.select?.name ?? "Unknown",
 						}
 					})
 					.filter((e) => e.link !== "")
@@ -585,8 +569,10 @@ worker.sync("competitorScan", {
 			// Lấy startDate xa nhất và endDate gần nhất
 			const minStartDate = relatedEntries.reduce((min, e) => e.startDate < min ? e.startDate : min, relatedEntries[0].startDate)
 			const maxEndDate = relatedEntries.reduce((max, e) => e.endDate > max ? e.endDate : max, relatedEntries[0].endDate)
+			const threatenedProduct = relatedEntries[0].threatenedProduct
+			const solutionArea = relatedEntries[0].solutionArea
 			try {
-				const items = await scanThirdPartyMentions(subjectName, minStartDate, maxEndDate)
+				const items = await scanThirdPartyMentions(subjectName, minStartDate, maxEndDate, threatenedProduct, solutionArea)
 				allItems.push(...items)
 			} catch (err) {
 				console.error(`Lỗi scan mentions [${subjectName}]:`, err)
@@ -645,8 +631,10 @@ worker.tool("scanChannelNow", {
 	schema: j.object({
 		url: j.string().describe("Link kênh YouTube hoặc website cần quét gấp"),
 		subjectName: j.string().describe("Tên đối thủ/KOL tương ứng với link này"),
+		threatenedProduct: j.string().describe("Tên sản phẩm bị đe dọa"),
+		solutionArea: j.string().describe("Tên mảng giải pháp"),
 	}),
-	execute: async ({ url, subjectName }, { notion }) => {
+	execute: async ({ url, subjectName, threatenedProduct, solutionArea }, { notion }) => {
 		const isYouTube =
 			url.includes("youtube.com") || url.includes("youtu.be") || url.includes("/@")
 
@@ -659,6 +647,8 @@ worker.tool("scanChannelNow", {
 			startDate: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), // Default 7 days
 			endDate: new Date().toISOString(),
 			requestScan: true,
+			threatenedProduct: threatenedProduct ?? "Unknown",
+			solutionArea: solutionArea ?? "Unknown",
 		}
 
 		let items: ProcessedItem[]
