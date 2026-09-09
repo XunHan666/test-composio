@@ -39,8 +39,8 @@ interface WatchlistEntry {
 	pageId: string
 	id: string
 	name: string
-	type: "YouTube" | "Website"
-	link: string
+	youtubeLink: string  // rỗng = không có kênh YouTube
+	websiteLink: string  // rỗng = không có website
 	threatenedProduct: string
 	solutionArea: string
 }
@@ -267,7 +267,7 @@ async function scanYouTubeChannel(
 	let videos: Array<{ videoId: string; title: string; description: string; publishedAt: string }> = []
 
 	try {
-		videos = await fetchRecentYouTubeVideos(entry.link, startDate, endDate)
+		videos = await fetchRecentYouTubeVideos(entry.youtubeLink, startDate, endDate)
 	} catch (err) {
 		console.error(`Lỗi lấy video YouTube [${entry.name}]:`, err)
 		return items
@@ -303,7 +303,7 @@ async function scanWebsite(
 	startDate: string,
 	endDate: string,
 ): Promise<ProcessedItem[]> {
-	const content = await fetchWebsiteContent(entry.link)
+	const content = await fetchWebsiteContent(entry.websiteLink)
 	if (!content) return []
 
 	await geminiPacer.wait()
@@ -317,7 +317,7 @@ async function scanWebsite(
 	const now = new Date().toISOString()
 	return [
 		{
-			eventId: hashString(`web-${entry.link}-${now.slice(0, 10)}`),
+			eventId: hashString(`web-${entry.websiteLink}-${now.slice(0, 10)}`),
 			shortTitle: `Phân tích website ${entry.name}`,
 			subjectName: entry.name,
 			platform: "Website",
@@ -327,7 +327,7 @@ async function scanWebsite(
 			threatenedProduct: entry.threatenedProduct,
 			solutionArea: entry.solutionArea,
 			transcriptSource: "Không",
-			link: entry.link,
+			link: entry.websiteLink,
 			publishedAt: now,
 		},
 	]
@@ -562,15 +562,13 @@ worker.webhook("investigateCompetitors", {
 								pageId: p.id,
 								id: props["ID"]?.rich_text?.[0]?.plain_text ?? p.id,
 								name: props["Tên kênh/Website"]?.title?.[0]?.plain_text ?? "Unknown",
-								type: (props["Loại"]?.select?.name === "YouTube"
-									? "YouTube"
-									: "Website") as "YouTube" | "Website",
-								link: props["Link"]?.url ?? "",
+								youtubeLink: props["Link YouTube"]?.url ?? "",
+								websiteLink: props["Link Website"]?.url ?? "",
 								threatenedProduct: props["Sản phẩm bị đe dọa"]?.select?.name ?? "Unknown",
 								solutionArea: props["Mảng giải pháp"]?.select?.name ?? "Unknown",
 							}
 						})
-						.filter((e) => e.link !== "")
+						.filter((e) => e.youtubeLink !== "" || e.websiteLink !== "")
 				}
 			} catch (err) {
 				console.error("Lỗi đọc watchlist:", err)
@@ -583,7 +581,8 @@ worker.webhook("investigateCompetitors", {
 			// ── Bước 4–6: Quét YouTube / Website / Bên thứ 3 ───────────────
 			const allItems: ProcessedItem[] = []
 
-			for (const entry of watchlistEntries.filter((e) => e.type === "YouTube")) {
+			// Mỗi đối thủ có thể có cả YouTube và Website
+			for (const entry of watchlistEntries.filter((e) => e.youtubeLink !== "")) {
 				try {
 					const items = await scanYouTubeChannel(entry, fromDate, toDate)
 					allItems.push(...items)
@@ -593,7 +592,7 @@ worker.webhook("investigateCompetitors", {
 				}
 			}
 
-			for (const entry of watchlistEntries.filter((e) => e.type === "Website")) {
+			for (const entry of watchlistEntries.filter((e) => e.websiteLink !== "")) {
 				try {
 					const items = await scanWebsite(entry, fromDate, toDate)
 					allItems.push(...items)
@@ -793,8 +792,8 @@ worker.tool("scanChannelNow", {
 			pageId: "tool-run",
 			id: hashString(url),
 			name: subjectName,
-			type: isYouTube ? "YouTube" : "Website",
-			link: url,
+			youtubeLink: isYouTube ? url : "",
+			websiteLink: isYouTube ? "" : url,
 			threatenedProduct: threatenedProduct ?? "Unknown",
 			solutionArea: solutionArea ?? "Unknown",
 		}
@@ -845,7 +844,7 @@ worker.tool("scanChannelNow", {
 		const created = await writeItemsToNotionDb(items, ds.id, notion, existingIds)
 
 		return {
-			summary: `✅ Quét xong ${subjectName} (${entry.type}): ${items.length} sự kiện phát hiện, ghi thành công ${created} vào Notion.`,
+			summary: `✅ Quét xong ${subjectName} (${isYouTube ? "YouTube" : "Website"}): ${items.length} sự kiện phát hiện, ghi thành công ${created} vào Notion.`,
 		}
 	},
 })
